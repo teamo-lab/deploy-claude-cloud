@@ -23,6 +23,7 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 class RuntimeConfig:
     claude_bin: str
     claude_model: str
+    claude_effort: str
     claude_timeout_seconds: int
     generated_skills_dir: Path
     github_repo: str
@@ -32,15 +33,16 @@ class RuntimeConfig:
 
 
 def _load_config() -> RuntimeConfig:
-    timeout_raw = os.environ.get("CLAUDE_TIMEOUT_SECONDS", "180")
+    timeout_raw = os.environ.get("CLAUDE_TIMEOUT_SECONDS", "45")
     try:
-        timeout_seconds = max(30, int(timeout_raw))
+        timeout_seconds = max(5, int(timeout_raw))
     except ValueError:
-        timeout_seconds = 180
+        timeout_seconds = 45
 
     return RuntimeConfig(
         claude_bin=os.environ.get("CLAUDE_BIN", "claude"),
         claude_model=os.environ.get("CLAUDE_MODEL", "sonnet"),
+        claude_effort=os.environ.get("CLAUDE_EFFORT", "low"),
         claude_timeout_seconds=timeout_seconds,
         generated_skills_dir=Path(os.environ.get("GENERATED_SKILLS_DIR", "/tmp/generated-skills")),
         github_repo=os.environ.get("GITHUB_REPO", "teamo-lab/clawschool"),
@@ -108,26 +110,21 @@ def _raw_url_for_path(config: RuntimeConfig, repo_path: str) -> str:
 
 
 def _build_claude_prompt(diagnosis: DiagnosisPayload) -> str:
-    weak_questions = []
-    for q in diagnosis.questionDetails:
-        gap = (q.maxScore or 10) - (q.score or 0)
-        weak_questions.append(
+    weak_questions = _collect_weak_questions(diagnosis)
+    compact_weak_questions = []
+    for item in weak_questions[:4]:
+        compact_weak_questions.append(
             {
-                "questionId": q.questionId,
-                "title": q.title,
-                "category": q.category,
-                "score": q.score,
-                "maxScore": q.maxScore,
-                "gap": gap,
-                "reason": q.reason,
+                "questionId": item["questionId"],
+                "title": item["title"],
+                "gap": item["gap"],
+                "reason": item["reason"],
             }
         )
-    weak_questions.sort(key=lambda item: item["gap"], reverse=True)
-    weak_questions = weak_questions[:6]
 
     return (
         "你是资深的 OpenClaw 能力诊断工程师。\n"
-        "请根据诊断结果生成 1-3 个可直接落地的 Skill 文档。\n"
+        "请根据弱项结果生成 1-2 个可直接落地的 Skill 文档。\n"
         "每个 skill 需要包含：\n"
         "1) 可读的英文 slug 名称（短横线命名）\n"
         "2) 一句话 summary\n"
@@ -137,7 +134,7 @@ def _build_claude_prompt(diagnosis: DiagnosisPayload) -> str:
         f"lobsterName: {diagnosis.lobsterName}\n"
         f"scope: {diagnosis.scope}\n"
         f"总分/智力: {diagnosis.score}/{diagnosis.iq}\n"
-        f"弱项明细(按 gap 排序):\n{json.dumps(weak_questions, ensure_ascii=False, indent=2)}\n"
+        f"弱项明细(按 gap 排序):\n{json.dumps(compact_weak_questions, ensure_ascii=False)}\n"
     )
 
 
@@ -179,6 +176,8 @@ def _call_claude_for_skills(diagnosis: DiagnosisPayload, config: RuntimeConfig) 
     ]
     if config.claude_model:
         cmd.extend(["--model", config.claude_model])
+    if config.claude_effort:
+        cmd.extend(["--effort", config.claude_effort])
 
     completed = subprocess.run(
         cmd,
@@ -249,24 +248,7 @@ def _fallback_skill_content(skill_name: str, summary: str, diagnosis: DiagnosisP
 
 
 def _fallback_skills(diagnosis: DiagnosisPayload) -> List[Dict[str, str]]:
-    candidates: List[Dict[str, Any]] = []
-    for q in diagnosis.questionDetails:
-        gap = (q.maxScore or 10) - (q.score or 0)
-        if gap <= 0:
-            continue
-        mapped = QUESTION_SKILL_MAP.get(q.questionId)
-        if not mapped:
-            continue
-        candidates.append(
-            {
-                "questionId": q.questionId,
-                "gap": gap,
-                "name": mapped["name"],
-                "summary": mapped["summary"],
-            }
-        )
-
-    candidates.sort(key=lambda item: item["gap"], reverse=True)
+    candidates = _collect_weak_questions(diagnosis)
     if not candidates:
         candidates = [
             {
@@ -279,13 +261,20 @@ def _fallback_skills(diagnosis: DiagnosisPayload) -> List[Dict[str, str]]:
 
     skills: List[Dict[str, str]] = []
     for item in candidates[:3]:
+        mapped = QUESTION_SKILL_MAP.get(item["questionId"])
+        if mapped:
+            skill_name = mapped["name"]
+            skill_summary = mapped["summary"]
+        else:
+            skill_name = item["name"]
+            skill_summary = item["summary"]
         skills.append(
             {
-                "name": item["name"],
-                "summary": item["summary"],
+                "name": skill_name,
+                "summary": skill_summary,
                 "content": _fallback_skill_content(
-                    item["name"],
-                    item["summary"],
+                    skill_name,
+                    skill_summary,
                     diagnosis,
                     item["questionId"],
                 ),
@@ -401,6 +390,31 @@ def _claude_auth_status(config: RuntimeConfig) -> Dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
+def _collect_weak_questions(diagnosis: DiagnosisPayload) -> List[Dict[str, Any]]:
+    weak_questions: List[Dict[str, Any]] = []
+    for q in diagnosis.questionDetails:
+        gap = (q.maxScore or 10) - (q.score or 0)
+        if gap <= 0:
+            continue
+        mapped = QUESTION_SKILL_MAP.get(q.questionId, {})
+        weak_questions.append(
+            {
+                "questionId": q.questionId,
+                "title": q.title,
+                "category": q.category,
+                "score": q.score,
+                "maxScore": q.maxScore,
+                "gap": gap,
+                "reason": q.reason,
+                "name": mapped.get("name", f"{_slugify(q.questionId)}-hardening"),
+                "summary": mapped.get("summary", "专项能力修复"),
+            }
+        )
+
+    weak_questions.sort(key=lambda item: item["gap"], reverse=True)
+    return weak_questions
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {
@@ -419,14 +433,18 @@ def generate_skills(request: GenerateSkillsRequest) -> GenerateSkillsResponse:
     if not token:
         token = "anonymous"
 
-    try:
-        raw_skills = _call_claude_for_skills(diagnosis, CONFIG)
-        source = "claude"
-    except Exception as exc:
-        logger.warning("claude generation failed, fallback enabled: %s", exc)
+    weak_questions = _collect_weak_questions(diagnosis)
+    if not weak_questions:
         raw_skills = _fallback_skills(diagnosis)
         source = "fallback"
+    else:
+        try:
+            raw_skills = _call_claude_for_skills(diagnosis, CONFIG)
+            source = "claude"
+        except Exception as exc:
+            logger.warning("claude generation failed, fallback enabled: %s", exc)
+            raw_skills = _fallback_skills(diagnosis)
+            source = "fallback"
 
     skills = _persist_skills(token, diagnosis, raw_skills, source, CONFIG)
     return GenerateSkillsResponse(skills=skills, source=source)
-
