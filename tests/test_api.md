@@ -8,6 +8,7 @@
 - `POST /api/generate-skills`
   - Claude 成功返回结构化 skills
   - Claude 异常时 fallback 仍返回非空 skills
+  - 弱项为空时跳过 Claude 调用，直接 fallback（避免上游超时）
   - 生成的 skill 文件落盘到 `GENERATED_SKILLS_DIR/<token>/`
 
 ## 运行方式
@@ -36,4 +37,3 @@ GET /api/test/diagnose?token=<token>&scope=basic
 - 响应中包含 `generatedSkills`
 - `generatedSkills` 至少 1 个元素
 - 每个元素包含 `name` 和 `url`
-

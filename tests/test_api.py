@@ -101,7 +101,20 @@ class ClaudeCodeAPITestCase(unittest.TestCase):
         self.assertIn("name", data["skills"][0])
         self.assertIn("url", data["skills"][0])
 
+    def test_no_weak_questions_skip_claude(self):
+        payload = self._payload("PERFECT-TOKEN")
+        for q in payload["diagnosis"]["questionDetails"]:
+            q["score"] = q["maxScore"]
+            q["reason"] = "满分"
+
+        with patch("app.main._call_claude_for_skills", side_effect=AssertionError("should not call claude")):
+            response = self.client.post("/api/generate-skills", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["source"], "fallback")
+        self.assertGreaterEqual(len(data["skills"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
-
